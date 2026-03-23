@@ -21,12 +21,14 @@ import {
   type OpenClawChannelSessionSync,
   isManagedSessionKey,
   parseManagedSessionKey,
+  parseChannelSessionKey,
 } from '../openclawChannelSessionSync';
 import {
   extractGatewayHistoryEntries,
   extractGatewayMessageText,
 } from '../openclawHistory';
 import { buildOpenClawLocalTimeContextPrompt } from '../openclawLocalTimeContextPrompt';
+import { isDangerousCommand, getCommandDangerLevel } from '../commandSafety';
 import { OPENCLAW_AGENT_TIMEOUT_SECONDS } from '../openclawConfigSync';
 import { t } from '../../i18n';
 
@@ -137,6 +139,8 @@ type BufferedAgentEvent = {
 type PendingApprovalEntry = {
   requestId: string;
   sessionId: string;
+  /** When true, use 'allow-always' decision so OpenClaw adds the command to its allowlist. */
+  allowAlways?: boolean;
 };
 
 type ChannelHistorySyncEntry = {
@@ -885,19 +889,34 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       return;
     }
 
-    const decision = result.behavior === 'allow' ? 'allow-once' : 'deny';
+    const decision = result.behavior !== 'allow' ? 'deny'
+      : pending.allowAlways ? 'allow-always'
+      : 'allow-once';
     const client = this.gatewayClient;
     if (!client) {
       this.pendingApprovals.delete(requestId);
       return;
     }
 
+    const sessionId = pending.sessionId;
+
     void client.request('exec.approval.resolve', {
       id: requestId,
       decision,
+    }).then(() => {
+      // If the agent run already ended while waiting for user approval,
+      // continue the session so the model can see the actual command result.
+      if (!this.isSessionActive(sessionId)) {
+        const prompt = decision !== 'deny'
+          ? t('execApprovalApproved')
+          : t('execApprovalDenied');
+        void this.continueSession(sessionId, prompt).catch((error) => {
+          console.warn('[OpenClawRuntime] Failed to continue session after approval:', error);
+        });
+      }
     }).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
-      this.emit('error', pending.sessionId, `Failed to resolve OpenClaw approval: ${message}`);
+      this.emit('error', sessionId, `Failed to resolve OpenClaw approval: ${message}`);
     }).finally(() => {
       this.pendingApprovals.delete(requestId);
     });
@@ -2365,13 +2384,35 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       return;
     }
 
+    const command = typeof request.command === 'string' ? request.command : '';
+    const isLocalSession = parseChannelSessionKey(sessionKey) === null;
+    const dangerous = command ? isDangerousCommand(command) : false;
+
+    // Auto-approve safe commands: resolve immediately via gateway without showing the modal.
+    if (isLocalSession && !dangerous) {
+      this.pendingApprovals.set(requestId, { requestId, sessionId, allowAlways: true });
+      this.respondToPermission(requestId, { behavior: 'allow', updatedInput: {} });
+      return;
+    }
+
+    // Channel (IM) sessions: auto-approve all commands without desktop modal.
+    if (!isLocalSession) {
+      this.pendingApprovals.set(requestId, { requestId, sessionId, allowAlways: true });
+      this.respondToPermission(requestId, { behavior: 'allow', updatedInput: {} });
+      return;
+    }
+
     this.pendingApprovals.set(requestId, { requestId, sessionId });
+
+    const { level: dangerLevel, reason: dangerReason } = getCommandDangerLevel(command);
 
     const permissionRequest: PermissionRequest = {
       requestId,
       toolName: 'Bash',
       toolInput: {
         command: typeof request.command === 'string' ? request.command : '',
+        dangerLevel,
+        dangerReason,
         cwd: request.cwd ?? null,
         host: request.host ?? null,
         security: request.security ?? null,
