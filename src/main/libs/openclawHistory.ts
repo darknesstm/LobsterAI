@@ -14,6 +14,38 @@ const isRecord = (value: unknown): value is Record<string, unknown> => {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 };
 
+const collectTextChunks = (value: unknown): string[] => {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    return text ? [text] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectTextChunks(item));
+  }
+
+  if (!isRecord(value)) {
+    return [];
+  }
+
+  const chunks: string[] = [];
+  if (typeof value.text === 'string') {
+    const text = value.text.trim();
+    if (text) {
+      chunks.push(text);
+    }
+  }
+
+  if (value.content !== undefined) {
+    chunks.push(...collectTextChunks(value.content));
+  }
+  if (value.parts !== undefined) {
+    chunks.push(...collectTextChunks(value.parts));
+  }
+
+  return chunks;
+};
+
 export const extractGatewayMessageText = (message: unknown): string => {
   if (typeof message === 'string') {
     return message;
@@ -27,13 +59,13 @@ export const extractGatewayMessageText = (message: unknown): string => {
     return content;
   }
   if (Array.isArray(content)) {
-    const chunks: string[] = [];
-    for (const item of content) {
-      if (!isRecord(item)) continue;
-      if (item.type === 'text' && typeof item.text === 'string') {
-        chunks.push(item.text);
-      }
+    const chunks = collectTextChunks(content);
+    if (chunks.length > 0) {
+      return chunks.join('\n');
     }
+  }
+  if (isRecord(content)) {
+    const chunks = collectTextChunks(content);
     if (chunks.length > 0) {
       return chunks.join('\n');
     }
