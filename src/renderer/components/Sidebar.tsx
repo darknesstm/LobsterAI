@@ -378,11 +378,6 @@ const SidebarAgentList: React.FC<{
 
   const enabledAgents = agents.filter((a) => a.enabled);
 
-  // Hide section if only the default main agent exists
-  if (enabledAgents.length <= 1 && !enabledAgents.some((a) => a.source === 'preset')) {
-    return null;
-  }
-
   const handleSwitch = (agentId: string) => {
     if (agentId === currentAgentId) return;
     agentService.switchAgent(agentId);
@@ -403,7 +398,7 @@ const SidebarAgentList: React.FC<{
             }`}
             onClick={() => handleSwitch(agent.id)}
           >
-            <span className="text-base leading-none">{agent.icon || '🦞'}</span>
+            <span className="text-base leading-none">{agent.icon || (agent.id === 'main' ? '🦞' : '🤖')}</span>
             <span className="truncate flex-1 text-xs font-medium">{agent.name}</span>
           </div>
         ))}
